@@ -2,11 +2,14 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
+# Toggle for RT pre-computation optimization
+RT_PRECOMPUTE = True
+
 class ReintegrationTracking:
 
     #-------------------------------------------------------------------
 
-    def __init__(self, SX=256, SY=256, dt=.2, dd=5, sigma=.65, border="wall", has_hidden=False, 
+    def __init__(self, SX=256, SY=256, dt=.2, dd=5, sigma=.65, border="wall", has_hidden=False,
                  mix="stoch"):
         self.SX = SX
         self.SY = SY
@@ -16,6 +19,35 @@ class ReintegrationTracking:
         self.has_hidden = has_hidden
         self.border = border if border in ['wall', 'torus'] else 'wall'
         self.mix = mix
+
+        # Pre-compute values if toggle is enabled
+        if RT_PRECOMPUTE:
+            # Pre-compute position grid (computed once, reused every call)
+            x, y = jnp.arange(SX), jnp.arange(SY)
+            X, Y = jnp.meshgrid(x, y)
+            self.pos = jnp.dstack((Y, X)) + 0.5  # (SX, SY, 2)
+
+            # Pre-compute delta arrays
+            dxs, dys = [], []
+            for dx in range(-dd, dd + 1):
+                for dy in range(-dd, dd + 1):
+                    dxs.append(dx)
+                    dys.append(dy)
+            self.dxs = jnp.array(dxs)
+            self.dys = jnp.array(dys)
+
+            # Pre-compute constants
+            self.ma = dd - sigma  # max flow magnitude
+            self.area_norm = 4 * sigma ** 2
+            self.min_area = min(1, 2 * sigma)
+        else:
+            # Will compute on each call
+            self.pos = None
+            self.dxs = None
+            self.dys = None
+            self.ma = None
+            self.area_norm = None
+            self.min_area = None
 
     #-------------------------------------------------------------------
 
@@ -29,87 +61,112 @@ class ReintegrationTracking:
     #-------------------------------------------------------------------
 
     def _apply_without_hidden(self, A: jax.Array, F: jax.Array)->jax.Array:
+        # Get values (precomputed or compute now)
+        if RT_PRECOMPUTE:
+            pos = self.pos
+            dxs = self.dxs
+            dys = self.dys
+            min_area = self.min_area
+            area_norm = self.area_norm
+            ma = self.ma
+        else:
+            # Compute on the fly (original behavior)
+            x, y = jnp.arange(self.SX), jnp.arange(self.SY)
+            X, Y = jnp.meshgrid(x, y)
+            pos = jnp.dstack((Y, X)) + 0.5
+            dxs, dys = [], []
+            for dx in range(-self.dd, self.dd + 1):
+                for dy in range(-self.dd, self.dd + 1):
+                    dxs.append(dx)
+                    dys.append(dy)
+            dxs = jnp.array(dxs)
+            dys = jnp.array(dys)
+            min_area = min(1, 2 * self.sigma)
+            area_norm = 4 * self.sigma ** 2
+            ma = self.dd - self.sigma
 
-        x, y = jnp.arange(self.SX), jnp.arange(self.SY)
-        X, Y = jnp.meshgrid(x, y)
-        pos = jnp.dstack((Y, X)) + .5 #(SX, SY, 2)
-        dxs = []
-        dys = []
-        dd = self.dd
-        for dx in range(-dd, dd+1):
-            for dy in range(-dd, dd+1):
-                dxs.append(dx)
-                dys.append(dy)
-        dxs = jnp.array(dxs)
-        dys = jnp.array(dys)
+        sigma = self.sigma
+        border = self.border
+        SX, SY = self.SX, self.SY
 
         @partial(jax.vmap, in_axes=(None, None, 0, 0))
         def step(A, mu, dx, dy):
             Ar = jnp.roll(A, (dx, dy), axis=(0, 1))
             mur = jnp.roll(mu, (dx, dy), axis=(0, 1))
-            if self.border == 'torus':
+            if border == 'torus':
                 dpmu = jnp.min(jnp.stack(
-                    [jnp.absolute(pos[..., None] - (mur + jnp.array([di, dj])[None, None, :, None])) 
-                    for di in (-self.SX, 0, self.SX) for dj in (-self.SY, 0, self.SY)]
-                ), axis = 0)
-            else :
+                    [jnp.absolute(pos[..., None] - (mur + jnp.array([di, dj])[None, None, :, None]))
+                    for di in (-SX, 0, SX) for dj in (-SY, 0, SY)]
+                ), axis=0)
+            else:
                 dpmu = jnp.absolute(pos[..., None] - mur)
-            sz = .5 - dpmu + self.sigma
-            area = jnp.prod(jnp.clip(sz, 0, min(1, 2*self.sigma)) , axis = 2) / (4 * self.sigma**2)
+            sz = 0.5 - dpmu + sigma
+            area = jnp.prod(jnp.clip(sz, 0, min_area), axis=2) / area_norm
             nA = Ar * area
             return nA
 
-        ma = self.dd - self.sigma  # upper bound of the flow maggnitude
-        mu = pos[..., None] + jnp.clip(self.dt * F, -ma, ma) #(x, y, 2, c) : target positions (distribution centers)
+        mu = pos[..., None] + jnp.clip(self.dt * F, -ma, ma)
         if self.border == "wall":
-            mu = jnp.clip(mu, self.sigma, self.SX-self.sigma)
+            mu = jnp.clip(mu, sigma, SX - sigma)
 
         nA = step(A, mu, dxs, dys).sum(0)
-        
+
         return nA
 
     #-------------------------------------------------------------------
 
     def _apply_with_hidden(self, A: jax.Array, H: jax.Array, F: jax.Array):
+        # Get values (precomputed or compute now)
+        if RT_PRECOMPUTE:
+            pos = self.pos
+            dxs = self.dxs
+            dys = self.dys
+            min_area = self.min_area
+            area_norm = self.area_norm
+            ma = self.ma
+        else:
+            # Compute on the fly (original behavior)
+            x, y = jnp.arange(self.SX), jnp.arange(self.SY)
+            X, Y = jnp.meshgrid(x, y)
+            pos = jnp.dstack((Y, X)) + 0.5
+            dxs, dys = [], []
+            for dx in range(-self.dd, self.dd + 1):
+                for dy in range(-self.dd, self.dd + 1):
+                    dxs.append(dx)
+                    dys.append(dy)
+            dxs = jnp.array(dxs)
+            dys = jnp.array(dys)
+            min_area = min(1, 2 * self.sigma)
+            area_norm = 4 * self.sigma ** 2
+            ma = self.dd - self.sigma
 
-        x, y = jnp.arange(self.SX), jnp.arange(self.SY)
-        X, Y = jnp.meshgrid(x, y)
-        pos = jnp.dstack((Y, X)) + .5 #(SX, SY, 2)
-        dxs = []
-        dys = []
+        sigma = self.sigma
+        border = self.border
+        SX, SY = self.SX, self.SY
         dd = self.dd
-        for dx in range(-dd, dd+1):
-            for dy in range(-dd, dd+1):
-                dxs.append(dx)
-                dys.append(dy)
-        dxs = jnp.array(dxs)
-        dys = jnp.array(dys)
-        
-        @partial(jax.vmap, in_axes = (None, None, None, 0, 0))
-        def step_flow(A, H, mu, dx, dy):
-            """Summary
-            """
-            Ar = jnp.roll(A, (dx, dy), axis = (0, 1))
-            Hr = jnp.roll(H, (dx, dy), axis = (0, 1)) #(x, y, k)
-            mur = jnp.roll(mu, (dx, dy), axis = (0, 1))
 
-            if self.border == 'torus':
+        @partial(jax.vmap, in_axes=(None, None, None, 0, 0))
+        def step_flow(A, H, mu, dx, dy):
+            Ar = jnp.roll(A, (dx, dy), axis=(0, 1))
+            Hr = jnp.roll(H, (dx, dy), axis=(0, 1))  # (x, y, k)
+            mur = jnp.roll(mu, (dx, dy), axis=(0, 1))
+
+            if border == 'torus':
                 dpmu = jnp.min(jnp.stack(
-                    [jnp.absolute(pos[..., None] - (mur + jnp.array([di, dj])[None, None, :, None])) 
-                    for di in (-self.SX, 0, self.SX) for dj in (-self.SY, 0, self.SY)]
-                ), axis = 0)
-            else :
+                    [jnp.absolute(pos[..., None] - (mur + jnp.array([di, dj])[None, None, :, None]))
+                    for di in (-SX, 0, SX) for dj in (-SY, 0, SY)]
+                ), axis=0)
+            else:
                 dpmu = jnp.absolute(pos[..., None] - mur)
 
-            sz = .5 - dpmu + self.sigma
-            area = jnp.prod(jnp.clip(sz, 0, min(1, 2*self.sigma)) , axis = 2) / (4 * self.sigma**2)
+            sz = 0.5 - dpmu + sigma
+            area = jnp.prod(jnp.clip(sz, 0, min_area), axis=2) / area_norm
             nA = Ar * area
             return nA, Hr
 
-        ma = self.dd - self.sigma  # upper bound of the flow maggnitude
-        mu = pos[..., None] + jnp.clip(self.dt * F, -ma, ma) #(x, y, 2, c) : target positions (distribution centers)
-        if self.border == "wall":
-            mu = jnp.clip(mu, self.sigma, self.SX-self.sigma)
+        mu = pos[..., None] + jnp.clip(self.dt * F, -ma, ma)
+        if border == "wall":
+            mu = jnp.clip(mu, sigma, SX - sigma)
         nA, nH = step_flow(A, H, mu, dxs, dys)
 
         if self.mix == 'avg':
