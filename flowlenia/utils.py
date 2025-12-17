@@ -20,21 +20,34 @@ kx = jnp.array([
 ])
 ky = jnp.transpose(kx)
 
+# Vectorized single-channel Sobel
+def _sobel_single_channel(a):
+    """Compute Sobel gradient for a single 2D channel."""
+    gx = jsp.signal.convolve2d(a, kx, mode='same')
+    gy = jsp.signal.convolve2d(a, ky, mode='same')
+    return jnp.stack([gy, gx], axis=-1)  # (x, y, 2)
+
+@jax.jit
+def sobel(A):
+    """
+    Vectorized Sobel gradient using vmap over channels.
+    A : (x, y, c)
+    ret : (x, y, 2, c)
+    """
+    # vmap over last axis (channels), output on last axis
+    return jax.vmap(_sobel_single_channel, in_axes=-1, out_axes=-1)(A)
+
+# Keep old functions for backwards compatibility
 def sobel_x(A):
     """
     A : (x, y, c)
     ret : (x, y, c)
     """
-    return jnp.dstack([jsp.signal.convolve2d(A[:, :, c], kx, mode = 'same') 
+    return jnp.dstack([jsp.signal.convolve2d(A[:, :, c], kx, mode = 'same')
                     for c in range(A.shape[-1])])
 def sobel_y(A):
-    return jnp.dstack([jsp.signal.convolve2d(A[:, :, c], ky, mode = 'same') 
+    return jnp.dstack([jsp.signal.convolve2d(A[:, :, c], ky, mode = 'same')
                     for c in range(A.shape[-1])])
-  
-@jax.jit
-def sobel(A):
-    return jnp.concatenate((sobel_y(A)[:, :, None, :], sobel_x(A)[:, :, None, :]),
-                            axis = 2)
 
 
 
