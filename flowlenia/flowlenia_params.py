@@ -79,7 +79,7 @@ class FlowLeniaParams(eqx.Module):
     #-------------------------------------------------------------------
 
     def __call__(self, state: State, key: Optional[jax.Array]=None):
-        
+
         A, P = state.A, state.P
             # --- Original Lenia ---
         fA = jnp.fft.fft2(A, axes=(0,1))  # (x,y,c)
@@ -100,11 +100,15 @@ class FlowLeniaParams(eqx.Module):
 
         alpha = jnp.clip((A[:, :, None, :]/2)**2, .0, 1.)
 
-        F = jnp.clip(F * (1 - alpha) - C_grad * alpha, 
-                     -(self.cfg.dd-self.cfg.sigma), 
+        F = jnp.clip(F * (1 - alpha) - C_grad * alpha,
+                     -(self.cfg.dd-self.cfg.sigma),
                      self.cfg.dd - self.cfg.sigma)
 
-        nA, nP = self.RT(A, P, F) #type:ignore
+        # Pass key to RT for stochastic sampling (if enabled)
+        rt_key = None
+        if key is not None:
+            key, rt_key = jr.split(key)
+        nA, nP = self.RT(A, P, F, key=rt_key) #type:ignore
 
         state = state._replace(A=nA, P=nP)
 
@@ -112,7 +116,7 @@ class FlowLeniaParams(eqx.Module):
 
         if self.clbck is not None:
             state = self.clbck(state, key)
-        
+
         # ---
 
         return state
@@ -131,9 +135,20 @@ class FlowLeniaParams(eqx.Module):
 
     #-------------------------------------------------------------------
 
-    def rollout_(self, state: State, key: Optional[jax.Array]=None, 
+    def rollout_(self, state: State, key: Optional[jax.Array]=None,
                  steps: int=100)->State:
-        return jax.lax.fori_loop(0, steps, lambda i,s: self.__call__(s), state)
+        """Fast rollout without saving intermediate states. Supports stochastic RT if key provided."""
+        if key is not None:
+            # Use scan to thread key through steps for stochastic sampling
+            def _step(carry, _):
+                s, k = carry
+                k, k_ = jr.split(k)
+                s = self.__call__(s, k_)
+                return (s, k), None
+            (final_state, _), _ = jax.lax.scan(_step, (state, key), None, steps)
+            return final_state
+        else:
+            return jax.lax.fori_loop(0, steps, lambda i,s: self.__call__(s), state)
 
     #-------------------------------------------------------------------
 
@@ -141,7 +156,7 @@ class FlowLeniaParams(eqx.Module):
         """Compute the kernels fft and put dummy arrays as placeholders for A and P"""
         A = jnp.zeros((self.cfg.X, self.cfg.Y, self.cfg.C))
         P = jnp.zeros((self.cfg.X, self.cfg.Y, self.cfg.k))
-        fK = get_kernels_fft(self.cfg.X, self.cfg.Y, self.cfg.k, self.R, self.r, 
+        fK = get_kernels_fft(self.cfg.X, self.cfg.Y, self.cfg.k, self.R, self.r,
                              self.a, self.w, self.b)
         return State(A=A, P=P, fK=fK)
 
