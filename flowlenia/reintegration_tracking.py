@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
-# Toggle for RT pre-computation optimization
+# Toggle for RT pre-computation optimization (cleaner code, enabled by default)
 RT_PRECOMPUTE = True
 
 # Toggle for stochastic RT sampling (Monte Carlo approximation)
