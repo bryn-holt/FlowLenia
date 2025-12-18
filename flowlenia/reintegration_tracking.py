@@ -14,8 +14,6 @@ RT_SAMPLE_COUNT = 4  # Number of neighbors to sample (out of 9 for dd=1)
 RT_SPARSE = True
 RT_SPARSE_THRESHOLD = 1e-4  # Mass threshold for considering a cell "active"
 
-# Toggle for using index slicing instead of jnp.roll (experimental)
-RT_USE_SLICE = False
 
 
 def _dilate_mask(mask, radius):
